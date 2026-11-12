@@ -1,0 +1,518 @@
+import zipfile
+
+cargo_toml = """[package]
+name = "executive_dashboard"
+version = "0.1.0"
+edition = "2021"
+description = "Executive dashboard for a transit-hub retail portfolio, powered by Rust and WebAssembly"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+
+[profile.release]
+opt-level = "s"
+lto = true
+"""
+
+lib_rs = """use serde::Serialize;
+use wasm_bindgen::prelude::*;
+
+// ---------------------------------------------------------------------------
+// Hardcoded mockup data: a transit hub's tenant portfolio, Nov 2025 - Oct 2026.
+// Each tenant: (name, base monthly rent, base monthly utilities, base service charge)
+// ---------------------------------------------------------------------------
+const TENANTS: [(&str, f64, f64, f64); 8] = [
+    ("Metro Café", 42_000.0, 6_800.0, 3_100.0),
+    ("Terminal Pharmacy", 58_500.0, 4_200.0, 3_800.0),
+    ("SkyView Lounge", 96_000.0, 14_500.0, 7_200.0),
+    ("Urban Fitness", 71_000.0, 18_900.0, 5_400.0),
+    ("City Bank Branch", 64_000.0, 3_900.0, 4_600.0),
+    ("Newsstand & Gifts", 23_500.0, 2_100.0, 1_700.0),
+    ("Regional Bus Co.", 82_000.0, 9_300.0, 6_100.0),
+    ("Parking Operator", 118_000.0, 12_700.0, 8_900.0),
+];
+
+const METRICS: [&str; 3] = ["Revenue", "Utilities", "Service Charges"];
+
+const MONTHS: [&str; 12] = [
+    "2025-11", "2025-12", "2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06",
+    "2026-07", "2026-08", "2026-09", "2026-10",
+];
+
+#[derive(Clone, Serialize)]
+struct Record {
+    date: &'static str,
+    tenant: &'static str,
+    metric: &'static str,
+    amount: f64,
+}
+
+#[derive(Serialize)]
+struct Series {
+    metric: &'static str,
+    values: Vec<f64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Kpi {
+    label: &'static str,
+    value: f64,
+    change_pct: f64,
+}
+
+#[derive(Serialize)]
+struct Payload<'a> {
+    rows: Vec<&'a Record>,
+    labels: Vec<&'static str>,
+    series: Vec<Series>,
+    kpis: Vec<Kpi>,
+}
+
+fn round2(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
+}
+
+/// Deterministic generation of realistic monthly figures from the base values above.
+fn build_records() -> Vec<Record> {
+    let mut out = Vec::with_capacity(TENANTS.len() * MONTHS.len() * METRICS.len());
+    for (t, &(name, rent, util, svc)) in TENANTS.iter().enumerate() {
+        for (m, &date) in MONTHS.iter().enumerate() {
+            let mf = m as f64;
+            let wave = (mf * 0.7 + t as f64).sin(); // tenant-specific noise
+            let growth = 1.0 + 0.004 * mf; // slow rent escalation
+            let season = ((mf - 1.0) * std::f64::consts::PI / 6.0).cos(); // heating/cooling load
+
+            out.push(Record { date, tenant: name, metric: "Revenue", amount: round2(rent * growth * (1.0 + 0.05 * wave)) });
+            out.push(Record { date, tenant: name, metric: "Utilities", amount: round2(util * (1.0 + 0.12 * season + 0.04 * wave)) });
+            out.push(Record { date, tenant: name, metric: "Service Charges", amount: round2(svc * (1.0 + 0.02 * wave)) });
+        }
+    }
+    out
+}
+
+#[wasm_bindgen]
+pub struct Dashboard {
+    records: Vec<Record>,
+}
+
+#[wasm_bindgen]
+impl Dashboard {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Dashboard {
+        Dashboard { records: build_records() }
+    }
+
+    /// Names of all available metrics.
+    pub fn metrics(&self) -> Vec<String> {
+        METRICS.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Filter by metric names, sort by `sort_key` ("date" | "tenant" | "metric" | "amount"),
+    /// and return everything the UI needs: table rows, chart series and KPIs.
+    pub fn query(&self, metrics: Vec<String>, sort_key: &str, ascending: bool) -> Result<JsValue, JsValue> {
+        let selected = |m: &str| metrics.iter().any(|x| x.as_str() == m);
+
+        // 1. Filter
+        let mut rows: Vec<&Record> = self.records.iter().filter(|r| selected(r.metric)).collect();
+
+        // 2. Sort (with stable tie-breakers so the order is always deterministic)
+        rows.sort_by(|a, b| {
+            let primary = match sort_key {
+                "amount" => a.amount.total_cmp(&b.amount),
+                "tenant" => a.tenant.cmp(b.tenant),
+                "metric" => a.metric.cmp(b.metric),
+                _ => a.date.cmp(b.date),
+            };
+            let ord = primary
+                .then_with(|| a.date.cmp(b.date))
+                .then_with(|| a.tenant.cmp(b.tenant))
+                .then_with(|| a.metric.cmp(b.metric));
+            if ascending { ord } else { ord.reverse() }
+        });
+
+        // 3. Chart series: monthly portfolio total per selected metric
+        let mut series = Vec::new();
+        for m in METRICS {
+            if !selected(m) {
+                continue;
+            }
+            let values = MONTHS.iter().map(|&mo| self.month_total(m, mo)).collect();
+            series.push(Series { metric: m, values });
+        }
+
+        let payload = Payload { rows, labels: MONTHS.to_vec(), series, kpis: self.kpis() };
+        serde_wasm_bindgen::to_value(&payload).map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+}
+
+impl Dashboard {
+    fn month_total(&self, metric: &str, month: &str) -> f64 {
+        let sum: f64 = self
+            .records
+            .iter()
+            .filter(|r| r.metric == metric && r.date == month)
+            .map(|r| r.amount)
+            .sum();
+        round2(sum)
+    }
+
+    /// Latest-month KPIs with month-over-month change (always portfolio-wide).
+    fn kpis(&self) -> Vec<Kpi> {
+        let (cur_m, prev_m) = (MONTHS[MONTHS.len() - 1], MONTHS[MONTHS.len() - 2]);
+        let pct = |cur: f64, prev: f64| if prev == 0.0 { 0.0 } else { (cur - prev) / prev * 100.0 };
+
+        let cur: Vec<f64> = METRICS.iter().map(|m| self.month_total(m, cur_m)).collect();
+        let prev: Vec<f64> = METRICS.iter().map(|m| self.month_total(m, prev_m)).collect();
+        let noi = |v: &[f64]| v[0] + v[2] - v[1]; // revenue + service charges - utilities
+
+        let mut kpis: Vec<Kpi> = METRICS
+            .iter()
+            .enumerate()
+            .map(|(i, &label)| Kpi { label, value: cur[i], change_pct: pct(cur[i], prev[i]) })
+            .collect();
+        kpis.push(Kpi { label: "Net Operating Income", value: noi(&cur), change_pct: pct(noi(&cur), noi(&prev)) });
+        kpis
+    }
+}
+"""
+
+index_html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hub Operations Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header class="site-header">
+    <h1>Hub Operations Dashboard</h1>
+    <p>Tenant portfolio, November 2025 to October 2026</p>
+  </header>
+
+  <main>
+    <p id="error" class="error" role="alert" hidden></p>
+
+    <section class="kpis" id="kpis" aria-label="Key figures for October 2026"></section>
+
+    <section class="panel" aria-labelledby="chart-title">
+      <div class="panel-head">
+        <h2 id="chart-title">Monthly totals</h2>
+        <div class="group" id="metric-filters" role="group" aria-label="Show metrics">
+          <button class="chip" data-metric="Revenue" aria-pressed="true">Revenue</button>
+          <button class="chip" data-metric="Utilities" aria-pressed="true">Utilities</button>
+          <button class="chip" data-metric="Service Charges" aria-pressed="true">Service charges</button>
+        </div>
+      </div>
+      <div class="chart-box"><canvas id="chart" aria-label="Monthly totals by metric" role="img"></canvas></div>
+    </section>
+
+    <section class="panel" aria-labelledby="table-title">
+      <div class="panel-head">
+        <h2 id="table-title">Tenant records <span id="count" class="muted"></span></h2>
+        <div class="group" id="sort-controls" role="group" aria-label="Sort records">
+          <button class="btn" data-sort="amount" aria-pressed="false">Amount</button>
+          <button class="btn" data-sort="date" aria-pressed="true">Date</button>
+          <button class="btn" data-sort="tenant" aria-pressed="false">Tenant</button>
+          <button class="btn btn-solid" id="direction" aria-label="Toggle sort direction">Newest first</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col"><button class="th-btn" data-sort="date">Date</button></th>
+              <th scope="col"><button class="th-btn" data-sort="tenant">Tenant</button></th>
+              <th scope="col"><button class="th-btn" data-sort="metric">Metric</button></th>
+              <th scope="col" class="num"><button class="th-btn" data-sort="amount">Amount</button></th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
+"""
+
+styles_css = """:root {
+  --primary: #2d2a70;
+  --secondary: #00571a;
+  --action: #ed6b23;
+  --bg: #f4f5f8;
+  --surface: #ffffff;
+  --text: #1c1b33;
+  --muted: #6b6a80;
+  --line: #e3e4ec;
+  --radius: 10px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.site-header {
+  background: var(--primary);
+  color: #fff;
+  padding: 1.5rem clamp(1rem, 4vw, 3rem);
+}
+.site-header h1 { margin: 0; font-size: 1.6rem; font-weight: 650; }
+.site-header p { margin: 0.2rem 0 0; opacity: 0.8; font-size: 0.95rem; }
+
+main {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 1.5rem clamp(1rem, 4vw, 3rem) 3rem;
+  display: grid;
+  gap: 1.5rem;
+}
+
+.error {
+  margin: 0;
+  padding: 0.9rem 1rem;
+  border-left: 4px solid var(--action);
+  background: #fff3ec;
+  border-radius: 6px;
+}
+
+/* KPI row */
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 1rem;
+}
+.kpi {
+  background: var(--surface);
+  border-radius: var(--radius);
+  border-top: 4px solid var(--secondary);
+  padding: 1rem 1.25rem;
+}
+.kpi-label { color: var(--muted); font-size: 0.9rem; }
+.kpi-value { font-size: 1.7rem; font-weight: 650; color: var(--primary); }
+.kpi-change { font-size: 0.85rem; color: var(--muted); }
+.kpi-change.up { color: var(--secondary); }
+.kpi-change.down { color: #b3421a; }
+
+/* Panels */
+.panel {
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+}
+.panel-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+.panel-head h2 { margin: 0; font-size: 1.15rem; color: var(--primary); }
+.muted { color: var(--muted); font-weight: 400; font-size: 0.9rem; }
+.group { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+
+.chart-box { position: relative; height: 340px; }
+
+/* Buttons */
+button { font: inherit; cursor: pointer; }
+button:focus-visible { outline: 3px solid var(--action); outline-offset: 2px; }
+
+.chip, .btn {
+  padding: 0.4rem 0.9rem;
+  border-radius: 999px;
+  border: 1.5px solid var(--primary);
+  background: #fff;
+  color: var(--primary);
+}
+.chip[aria-pressed="true"] { background: var(--secondary); border-color: var(--secondary); color: #fff; }
+.btn[aria-pressed="true"] { background: var(--primary); color: #fff; }
+.btn-solid { background: var(--action); border-color: var(--action); color: #fff; }
+.btn-solid:hover { filter: brightness(0.94); }
+
+/* Table */
+.table-wrap { max-height: 420px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 0.6rem 0.9rem; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+thead th { position: sticky; top: 0; background: var(--primary); padding: 0; }
+.th-btn { width: 100%; padding: 0.65rem 0.9rem; border: 0; background: transparent; color: #fff; font-weight: 600; text-align: inherit; }
+.th-btn.active { color: #ffb88f; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr:hover { background: #f1f7f3; }
+
+@media (max-width: 600px) {
+  .chart-box { height: 280px; }
+  .kpi-value { font-size: 1.45rem; }
+}
+"""
+
+app_js = """import init, { Dashboard } from "./pkg/executive_dashboard.js";
+
+const COLORS = { Revenue: "#2d2a70", Utilities: "#ed6b23", "Service Charges": "#00571a" };
+const SORT_LABELS = {
+  date: ["Oldest first", "Newest first"],
+  amount: ["Lowest first", "Highest first"],
+  tenant: ["A to Z", "Z to A"],
+  metric: ["A to Z", "Z to A"],
+};
+
+const state = {
+  metrics: new Set(["Revenue", "Utilities", "Service Charges"]),
+  sortKey: "date",
+  ascending: false,
+};
+
+const $ = (sel) => document.querySelector(sel);
+const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+const money2 = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
+
+let dashboard;
+let chart;
+
+function render() {
+  // All filtering, sorting and aggregation happens in Rust/WASM.
+  const data = dashboard.query([...state.metrics], state.sortKey, state.ascending);
+  renderKpis(data.kpis);
+  renderChart(data);
+  renderTable(data.rows);
+  renderControls();
+}
+
+function renderKpis(kpis) {
+  $("#kpis").innerHTML = kpis
+    .map((k) => {
+      const dir = k.changePct >= 0 ? "up" : "down";
+      const sign = k.changePct >= 0 ? "+" : "";
+      // Utilities going up is not "good", but we keep the colouring neutral-simple here.
+      return `<article class="kpi">
+        <div class="kpi-label">${k.label}</div>
+        <div class="kpi-value">${money.format(k.value)}</div>
+        <div class="kpi-change ${dir}">${sign}${k.changePct.toFixed(1)}% vs September</div>
+      </article>`;
+    })
+    .join("");
+}
+
+function renderChart(data) {
+  const datasets = data.series.map((s) => ({
+    label: s.metric,
+    data: s.values,
+    backgroundColor: COLORS[s.metric],
+    borderRadius: 4,
+  }));
+
+  if (!chart) {
+    chart = new Chart($("#chart"), {
+      type: "bar",
+      data: { labels: data.labels, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { position: "bottom" },
+          tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${money.format(c.parsed.y)}` } },
+        },
+        scales: { y: { beginAtZero: true, ticks: { callback: (v) => `$${v / 1000}k` } } },
+      },
+    });
+  } else {
+    chart.data.labels = data.labels;
+    chart.data.datasets = datasets;
+    chart.update();
+  }
+}
+
+function renderTable(rows) {
+  $("#count").textContent = `${rows.length} records`;
+  $("#rows").innerHTML = rows
+    .map(
+      (r) => `<tr>
+        <td>${r.date}</td><td>${r.tenant}</td><td>${r.metric}</td>
+        <td class="num">${money2.format(r.amount)}</td>
+      </tr>`
+    )
+    .join("");
+}
+
+function renderControls() {
+  document.querySelectorAll("#metric-filters .chip").forEach((b) => {
+    b.setAttribute("aria-pressed", String(state.metrics.has(b.dataset.metric)));
+  });
+  document.querySelectorAll("#sort-controls [data-sort]").forEach((b) => {
+    b.setAttribute("aria-pressed", String(b.dataset.sort === state.sortKey));
+  });
+  document.querySelectorAll(".th-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.sort === state.sortKey);
+  });
+  $("#direction").textContent = SORT_LABELS[state.sortKey][state.ascending ? 0 : 1];
+}
+
+function setSort(key) {
+  if (key === state.sortKey) {
+    state.ascending = !state.ascending; // clicking the active sort flips direction
+  } else {
+    state.sortKey = key;
+    state.ascending = key === "tenant" || key === "metric"; // text sorts start A to Z
+  }
+  render();
+}
+
+function bindEvents() {
+  $("#metric-filters").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-metric]");
+    if (!btn) return;
+    const m = btn.dataset.metric;
+    state.metrics.has(m) ? state.metrics.delete(m) : state.metrics.add(m);
+    render();
+  });
+
+  document.querySelectorAll("[data-sort]").forEach((b) =>
+    b.addEventListener("click", () => setSort(b.dataset.sort))
+  );
+
+  $("#direction").addEventListener("click", () => {
+    state.ascending = !state.ascending;
+    render();
+  });
+}
+
+async function main() {
+  try {
+    await init(); // loads and instantiates the .wasm binary
+    dashboard = new Dashboard();
+    bindEvents();
+    render();
+  } catch (err) {
+    const box = $("#error");
+    box.hidden = false;
+    box.textContent =
+      "Could not load the WebAssembly module. Build it with wasm-pack and open this page through a local web server (not file://). " +
+      `Details: ${err}`;
+    console.error(err);
+  }
+}
+
+main();
+"""
+
+with zipfile.ZipFile('executive_dashboard.zip', 'w') as zf:
+    zf.writestr('executive-dashboard/Cargo.toml', cargo_toml)
+    zf.writestr('executive-dashboard/src/lib.rs', lib_rs)
+    zf.writestr('executive-dashboard/index.html', index_html)
+    zf.writestr('executive-dashboard/styles.css', styles_css)
+    zf.writestr('executive-dashboard/app.js', app_js)
+    zf.writestr('executive-dashboard/Exec-Dash.js', app_js)

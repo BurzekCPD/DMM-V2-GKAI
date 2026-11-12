@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hub Operations Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <h1>Hub Operations Dashboard</h1>
+    <p id="period">Tenant portfolio</p>
+  </header>
+
+  <main>
+    <p id="error" class="error" role="alert" hidden></p>
+    <div id="local-demo-banner" class="demo-banner" role="status" hidden>
+      <strong>Local showcase from the tenant snapshot — not verified live or recognized revenue.</strong>
+      <span>
+        <button class="btn" id="demo-refresh" type="button">Refresh data</button>
+        <button class="btn" id="demo-reset" type="button">Reset to default</button>
+    </div>
+
+    <section class="panel import-panel" id="import-panel" aria-labelledby="import-title" hidden>
+      <div class="panel-head">
+        <div>
+          <h2 id="import-title">Monthly data</h2>
+          <p id="dataset-status" class="muted" aria-live="polite"></p>
+          <p id="live-status" class="live-pill" role="status" hidden></p>
+        </div>
+        <div class="group">
+          <label class="file-button" for="csv-file">Import CSV or Excel
+            <input id="csv-file" type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+          </label>
+          <button class="btn" id="live-refresh" type="button">Refresh data</button>
+          <button class="btn" id="template">Download CSV template</button>
+          <button class="btn" id="logout" type="button" hidden>Sign out</button>
+        </div>
+      </div>
+      <details class="help-details">
+        <summary>Import and financial data guidance</summary>
+        <p class="help">The dashboard displays only records imported into the reporting backend; it does not fabricate operational results. Every import must declare one currency using a three-letter ISO code. Files containing more than one currency are rejected as a whole; no currency conversion is performed. Monetary values must use plain decimal notation without currency symbols or grouping separators. CSV and .xlsx files are supported. Required fields include Month, Tenant, Tenant ID, Slot, Data Type and Currency; station identifiers are retained as missing when unavailable and surfaced by the data-quality check. Add stable Source Record ID values for reliable deduplication; when omitted, an ID derived from the exact file and row makes identical file retries idempotent. Imports are append-only and do not overwrite existing financial rows. Rejected rows and their validation reasons are retained in import history.</p>
+      </details>
+    </section>
+
+    <section class="panel filters-panel" id="global-filters" aria-labelledby="filters-title" hidden>
+      <div class="panel-head">
+        <h2 id="filters-title">Global report filters</h2>
+        <span class="muted">Applied to KPIs, chart, records and MGR where applicable</span>
+      </div>
+      <div class="table-search">
+        <label for="year-filter">Year</label>
+        <select id="year-filter"></select>
+        <label for="station-filter">Station</label>
+        <select id="station-filter"></select>
+        <label for="tenant-filter">Tenant</label>
+        <select id="tenant-filter"></select>
+        <label for="brand-filter">Brand</label>
+        <select id="brand-filter"></select>
+        <label for="slot-filter">Commercial slot</label>
+        <select id="slot-filter"></select>
+        <label for="data-type-filter">Data type</label>
+        <select id="data-type-filter"></select>
+        <label for="billing-filter">Billing status</label>
+        <select id="billing-filter"></select>
+        <label for="currency-filter">Currency</label>
+        <select id="currency-filter"></select>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="summary-title" hidden>
+      <div class="panel-head">
+        <h2 id="summary-title">Revenue summary</h2>
+        <label class="month-select" for="month-filter">Month
+          <select id="month-filter"></select>
+        </label>
+      </div>
+      <section class="kpis" id="kpis" aria-label="Monthly revenue and guarantee figures"></section>
+      <div class="fulfillment" id="fulfillment" aria-live="polite"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="chart-title" hidden>
+      <div class="panel-head">
+        <h2 id="chart-title">Revenue composition components</h2>
+        <span class="muted">Components only; forecast and billed/unbilled realization are excluded to avoid double counting</span>
+      </div>
+      <div class="chart-box" id="chart"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="performance-title" hidden>
+      <div class="panel-head">
+        <h2 id="performance-title">Station and tenant performance</h2>
+        <span class="muted">Uses Slot Revenue only; this is not recognized or collected revenue</span>
+      </div>
+      <div class="performance-grid">
+        <div>
+          <h3>Station ranking <span id="station-performance-count" class="muted"></span></h3>
+          <div class="table-wrap">
+            <table><thead><tr><th>Rank</th><th>Station</th><th>Slot Revenue</th><th>Revenue per slot</th><th>MGR fulfilled</th></tr></thead>
+              <tbody id="station-performance"></tbody></table>
+          </div>
+        </div>
+        <div>
+          <h3>Tenant and brand contribution <span id="tenant-performance-count" class="muted"></span></h3>
+          <div class="table-wrap">
+            <table><thead><tr><th>Rank</th><th>Tenant</th><th>Brand</th><th>Slot Revenue</th><th>Contribution</th><th>Imported billing states</th></tr></thead>
+              <tbody id="tenant-performance"></tbody></table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="table-title" hidden>
+      <div class="panel-head">
+        <h2 id="table-title">Monthly records <span id="count" class="muted"></span></h2>
+        <div class="group" id="sort-controls" role="group" aria-label="Sort records">
+          <button class="btn" data-sort="amount" aria-pressed="false">Amount</button>
+          <button class="btn" data-sort="month" aria-pressed="true">Month</button>
+          <button class="btn" data-sort="tenant" aria-pressed="false">Tenant</button>
+          <button class="btn btn-solid" id="direction" aria-label="Toggle sort direction">Newest first</button>
+        </div>
+      </div>
+      <div class="table-search">
+        <label for="records-search">Search tenant, company, brand, station or slot</label>
+        <input id="records-search" type="search" autocomplete="off" placeholder="Search tenant, company, brand, station or slot…">
+      </div>
+      <div class="table-wrap">
+        <table class="records-table">
+          <colgroup>
+            <col class="record-month">
+            <col class="record-station">
+            <col class="record-tenant">
+            <col class="record-company">
+            <col class="record-brand">
+            <col class="record-id">
+            <col class="record-type">
+            <col class="record-billing">
+            <col class="record-amount">
+            <col class="record-source">
+          </colgroup>
+          <thead>
+            <tr>
+              <th scope="col"><button class="th-btn" data-sort="month">Month</button></th>
+              <th scope="col">Station</th>
+              <th scope="col"><button class="th-btn" data-sort="tenant">Tenant</button></th>
+              <th scope="col">Legal tenant</th>
+              <th scope="col"><button class="th-btn" data-sort="brand">Brand</button></th>
+              <th scope="col"><button class="th-btn" data-sort="id">ID</button></th>
+              <th scope="col">Data type</th>
+              <th scope="col"><button class="th-btn" data-sort="billing">Billing</button></th>
+              <th scope="col" class="num"><button class="th-btn" data-sort="amount">Calculated amount</button></th>
+              <th scope="col">Source reference</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="mgr-title" hidden>
+      <div class="panel-head">
+        <h2 id="mgr-title">Minimum Guaranteed Revenue by slot</h2>
+        <span class="muted">Service charges are excluded from MGR fulfillment</span>
+      </div>
+      <div class="table-search">
+        <label for="mgr-search">Search MGR by slot</label>
+        <input id="mgr-search" type="search" autocomplete="off" placeholder="Search month, tenant, slot, or status…">
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th scope="col">Month</th><th scope="col">Station</th><th scope="col">Tenant</th><th scope="col">Slot</th><th scope="col">Minimum guaranteed</th><th scope="col">Base slot revenue</th><th scope="col">Status</th></tr>
+          </thead>
+          <tbody id="mgr-rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="imports-title" hidden>
+      <details id="import-history">
+        <summary id="imports-title">Import history</summary>
+        <div id="import-history-content" class="import-history"></div>
+      </details>
+    </section>
+
+    <section class="panel" aria-labelledby="quality-title" hidden>
+      <div class="panel-head">
+        <h2 id="quality-title">Data quality</h2>
+        <span class="muted">Reference matching is unavailable until authorized source registries are connected</span>
+      </div>
+      <div id="data-quality" aria-live="polite"></div>
+      <h3>Financial reconciliation</h3>
+      <div id="reconciliation-status" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <script src="config.js"></script>
+  <script src="demo-data.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
