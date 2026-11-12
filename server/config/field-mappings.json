@@ -1,0 +1,64 @@
+{
+  "manual_csv": {
+    "month": ["month", "reporting_month", "billing_period"],
+    "tenant": ["tenant", "tenant_name"],
+    "tenant_id": ["tenant_id", "tenant_code"],
+    "company": ["company", "legal_entity"],
+    "brand": ["brand", "brand_name"],
+    "slot": ["slot", "slot_id", "commercial_slot_id"],
+    "station": ["station", "station_name"],
+    "station_id": ["station_id", "station_code"],
+    "data_type": ["data_type", "record_type"],
+    "currency": ["currency", "currency_code"],
+    "trips": ["trips", "transaction_count"],
+    "quantity": ["quantity", "area", "consumption"],
+    "tariff": ["tariff", "unit_rate"],
+    "total_amount": ["total_amount", "amount", "transaction_value"],
+    "billing_status": ["billing_status", "status"],
+    "annual_surcharge_rate": ["annual_surcharge_rate"],
+    "minimum_base_rent": ["minimum_base_rent", "minimum_guaranteed_revenue"],
+    "unit": ["unit", "unit_of_measure"],
+    "source_record_id": ["source_record_id", "record_id", "transaction_id"]
+  },
+  "pos": {
+    "configured": false,
+    "unavailable_until_source_mapping_is_supplied": [
+      "transaction_id",
+      "transaction_datetime",
+      "station_id",
+      "tenant_id",
+      "commercial_slot_id",
+      "transaction_count",
+      "transaction_value",
+      "tariff",
+      "transaction_status",
+      "reversal_status",
+      "source_system_reference",
+      "currency"
+    ]
+  },
+  "tenant_billing": {
+    "configured": false,
+    "unavailable_until_source_mapping_is_supplied": [
+      "tenant_id",
+      "tenant_name",
+      "company",
+      "brand",
+      "station_id",
+      "commercial_slot_id",
+      "billing_period",
+      "base_rental",
+      "minimum_base_rent",
+      "service_charge",
+      "area_operational_surcharge",
+      "invoice_number",
+      "invoice_amount",
+      "billing_status",
+      "payment_status",
+      "outstanding_amount",
+      "invoice_date",
+      "payment_date",
+      "currency"
+    ]
+  }
+}
